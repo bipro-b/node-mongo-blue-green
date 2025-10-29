@@ -32,20 +32,21 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Deploy to AWS EC2 (Blue-Green)
-        # 1. Define local variables using secrets
+        # We remove the 'env:' block here and handle variables in the 'run:' block.
         run: |
-          # Define local variables using secrets. These will be substituted by the runner.
+          # 1. Define local variables using secrets (Runner substitutes these)
           DOCKER_USER_SECRET="${{ secrets.DOCKER_USERNAME }}"
           DOCKER_PASS_SECRET="${{ secrets.DOCKER_PASSWORD }}"
           APP_IMAGE="${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest"
 
-          echo "${{ secrets.AWS_KEY }}" > bipro.pem
-          chmod 600 bipro.pem
+          # 2. Prepare SSH Key
+          echo "${{ secrets.AWS_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-          # 2. SSH into remote host using UNQUOTED EOF (<< EOF)
-          # This allows the runner to substitute the SECRET variables.
-          # All variables meant for the REMOTE shell must now be ESCAPED (\$).
-          ssh -o StrictHostKeyChecking=no -i bipro.pem ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << EOF
+          # 3. SSH into remote host using UNQUOTED EOF (<< EOF)
+          # The local runner substitutes the SECRET variables. 
+          # All other remote shell variables (\$USER, \$ACTIVE_COLOR, etc.) are escaped.
+          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << EOF
             set -e
 
             # --- Install docker & nginx if missing ---
@@ -61,11 +62,12 @@ jobs:
               sudo apt-get install -y nginx
             fi
 
-            # --- Ensure docker network (Fixed: Silenced error output) ---
+            # --- Ensure docker network (FIXED: Silencing error output) ---
+            # The '|| true' handles the 'already exists' error. '2>/dev/null' silences the output.
             docker network create app_net 2>/dev/null || true
 
             # --- Start MongoDB once (persists across deployments) ---
-            if ! docker ps --filter "name=mongo-db" --format '{{.Names}}' | grep -q '^mongo-db\$'; then # Escaped \$
+            if ! docker ps --filter "name=mongo-db" --format '{{.Names}}' | grep -q '^mongo-db\$'; then 
               docker run -d \\
                 --name mongo-db \\
                 --network app_net \\
@@ -77,11 +79,11 @@ jobs:
             fi
 
             # --- Pull latest app image ---
-            # *** FIX: Variables substituted here by the local runner ***
+            # FIX: These variables were substituted by the local runner with secret values
             docker login -u "${DOCKER_USER_SECRET}" -p "${DOCKER_PASS_SECRET}"
             docker pull "${APP_IMAGE}"
 
-            # --- Determine active color (All variables below must be escaped \$ to run on remote) ---
+            # --- Determine active color ---
             if docker ps --format '{{.Names}}' | grep -q '^app-blue\$'; then
               ACTIVE_COLOR="blue"
               IDLE_COLOR="green"
