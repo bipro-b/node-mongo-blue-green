@@ -2,7 +2,7 @@ name: CI/CD for Express App (Blue-Green Deployment)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 jobs:
   build-and-push:
@@ -24,121 +24,190 @@ jobs:
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
 
-deploy:
-  runs-on: ubuntu-latest
-  needs: build-and-push
-  steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
+      - name: Deploy to AWS EC2 (Blue-Green)
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          echo "${{ secrets.AWS_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-    - name: Deploy to AWS EC2 (Blue-Green)
-      env:
-        IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
-        DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-        DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-      run: |
-        echo "${{ secrets.AWS_KEY }}" > private_key.pem
-        chmod 600 private_key.pem
+          # Attach env to the remote session to avoid empty-username issues.
+          # -tt allocates a TTY (removes the pseudo-terminal warning).
+          ssh -tt -o StrictHostKeyChecking=no -i private_key.pem \
+            DOCKER_USERNAME="${DOCKER_USERNAME}" \
+            DOCKER_PASSWORD="${DOCKER_PASSWORD}" \
+            IMAGE="${IMAGE}" \
+            ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} 'bash -s' <<'EOF'
+set -Eeuo pipefail
 
-        # Pass secrets as env to the remote shell (note: no single quotes on EOF)
-        ssh -o StrictHostKeyChecking=no -i private_key.pem \
-          ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} \
-          "export IMAGE='${IMAGE}'; export DOCKER_USERNAME='${DOCKER_USERNAME}'; export DOCKER_PASSWORD='${DOCKER_PASSWORD}'; bash -s" << EOF
-        set -euo pipefail
-        echo "DOCKER_USERNAME"
-        # --- Install docker & nginx if missing ---
-        if ! command -v docker >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y docker.io
-          sudo usermod -aG docker \$USER || true
-          sudo systemctl enable --now docker
-        fi
-        
-        if ! command -v nginx >/dev/null 2>&1; then
-          sudo apt-get update -y
-          sudo apt-get install -y nginx
-        fi
-        
-        # --- Ensure docker network (ignore if exists) ---
-        docker network inspect app_net >/dev/null 2>&1 || docker network create app_net
-        
-        # --- Start MongoDB once (persists across deployments) ---
-        if ! docker ps --format '{{.Names}}' | grep -q '^mongo-db$'; then
-          docker run -d \
-            --name mongo-db \
-            --network app_net \
-            -p 27017:27017 \
-            -v mongo_data:/data/db \
-            mongo:7
-          echo "Waiting for MongoDB to initialize..."
-          sleep 10
-        fi
-        
-        # --- Login & pull image on the REMOTE machine ---
-        echo "\$DOCKER_PASSWORD" | docker login -u "\$DOCKER_USERNAME" --password-stdin
-        docker pull "\$IMAGE"
-        
-        # --- Determine active/idle colors & ports ---
-        if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
-          ACTIVE_COLOR="blue";  IDLE_COLOR="green"; IDLE_PORT=3002; ACTIVE_PORT=3001
-        elif docker ps --format '{{.Names}}' | grep -q '^app-green$'; then
-          ACTIVE_COLOR="green"; IDLE_COLOR="blue";  IDLE_PORT=3001; ACTIVE_PORT=3002
-        else
-          ACTIVE_COLOR="none";  IDLE_COLOR="blue";  IDLE_PORT=3001
-        fi
-        echo "Active: \$ACTIVE_COLOR | Deploying to: \$IDLE_COLOR (port \$IDLE_PORT)"
-        
-        # --- Replace idle container ---
-        docker rm -f app-\$IDLE_COLOR 2>/dev/null || true
-        docker run -d \
-          --name app-\$IDLE_COLOR \
-          --network app_net \
-          -p \$IDLE_PORT:5000 \
-          -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
-          "\$IMAGE"
-        
-        # --- Warmup/health check ---
-        for i in {1..20}; do
-          if curl -fsS "http://127.0.0.1:\$IDLE_PORT/health" >/dev/null; then
-            echo "New app is healthy."
-            break
-          fi
-          sleep 2
-        done
-        
-        # --- NGINX: create once then swap upstream port ---
-        if [ ! -f /etc/nginx/conf.d/bluegreen.conf ]; then
-          sudo mkdir -p /etc/nginx/conf.d
-          sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<NGX
-        server {
-            listen 3000;
-            server_name _;
-        
-            location / {
-                proxy_pass http://127.0.0.1:\$IDLE_PORT;
-                proxy_http_version 1.1;
-                proxy_set_header Connection "";
-                proxy_set_header Host \$host;
-                proxy_set_header X-Real-IP \$remote_addr;
-                proxy_set_header X-Forwarded-Proto \$scheme;
-                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-            }
-        }
-        NGX
-          sudo nginx -t
-          sudo systemctl restart nginx
-        else
-          sudo sed -i "s|proxy_pass http://127.0.0.1:[0-9]*;|proxy_pass http://127.0.0.1:\$IDLE_PORT;|g" /etc/nginx/conf.d/bluegreen.conf
-          sudo nginx -t
-          sudo nginx -s reload
-        fi
-        
-        echo "Switched traffic to \$IDLE_COLOR."
-        
-        # --- Cleanup old active (or keep for quick rollback) ---
-        if [ "\$ACTIVE_COLOR" != "none" ]; then
-          docker rm -f app-\$ACTIVE_COLOR || true
-          echo "Removed old \$ACTIVE_COLOR."
-        fi
-        EOF
+log() { printf "[%s] %s\n" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"; }
+trap 'log "ERROR on line $LINENO"; exit 1' ERR
+
+log "===== Starting Blue-Green Deployment ====="
+log "Host: $(hostname -f)"
+log "User: $USER"
+log "Docker user (non-secret): ${DOCKER_USERNAME:-__EMPTY__}"
+log "Image: ${IMAGE:-__EMPTY__}"
+
+if [ -z "${DOCKER_USERNAME:-}" ] || [ -z "${DOCKER_PASSWORD:-}" ] || [ -z "${IMAGE:-}" ]; then
+  log "One or more required env vars are empty (DOCKER_USERNAME / DOCKER_PASSWORD / IMAGE). Failing fast."
+  exit 1
+fi
+
+# --- Install docker & nginx if missing ---
+if ! command -v docker >/dev/null 2>&1; then
+  log "Docker not found. Installing..."
+  sudo apt-get update -y
+  sudo apt-get install -y docker.io
+  sudo usermod -aG docker "$USER" || true
+  sudo systemctl enable --now docker
+else
+  log "Docker found: $(docker --version)"
+fi
+
+if ! command -v nginx >/dev/null 2>&1; then
+  log "NGINX not found. Installing..."
+  sudo apt-get update -y
+  sudo apt-get install -y nginx
+else
+  log "NGINX found: $(nginx -v 2>&1)"
+fi
+
+# --- Ensure docker network (quiet if exists) ---
+if docker network inspect app_net >/dev/null 2>&1; then
+  log "Docker network 'app_net' already exists."
+else
+  log "Creating docker network 'app_net'..."
+  docker network create app_net
+fi
+
+# --- Ensure MongoDB is running (one-time) ---
+if docker ps --format '{{.Names}}' | grep -q '^mongo-db$'; then
+  log "Mongo container 'mongo-db' is already running."
+else
+  log "Starting MongoDB container 'mongo-db'..."
+  docker run -d \
+    --name mongo-db \
+    --network app_net \
+    -p 27017:27017 \
+    -v mongo_data:/data/db \
+    mongo:7
+  log "Waiting for MongoDB to initialize..."
+  sleep 10
+fi
+
+# --- Docker login & pull image on the REMOTE host ---
+log "Logging in to Docker Hub (username only shown)..."
+echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin >/dev/null
+log "Pulling image: $IMAGE"
+docker pull "$IMAGE" >/dev/null
+
+# --- Determine active/idle colors & ports ---
+ACTIVE_COLOR="none"
+IDLE_COLOR="blue"
+IDLE_PORT=3001
+ACTIVE_PORT=""
+
+if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
+  ACTIVE_COLOR="blue"
+  IDLE_COLOR="green"
+  IDLE_PORT=3002
+  ACTIVE_PORT=3001
+elif docker ps --format '{{.Names}}' | grep -q '^app-green$'; then
+  ACTIVE_COLOR="green"
+  IDLE_COLOR="blue"
+  IDLE_PORT=3001
+  ACTIVE_PORT=3002
+fi
+
+log "Active color: $ACTIVE_COLOR"
+log "Idle   color: $IDLE_COLOR"
+log "Idle   port : $IDLE_PORT"
+[ -n "$ACTIVE_PORT" ] && log "Active port: $ACTIVE_PORT"
+
+# --- Replace idle container ---
+log "Removing old idle container (if exists): app-$IDLE_COLOR"
+docker rm -f "app-$IDLE_COLOR" >/dev/null 2>&1 || true
+
+log "Starting new idle container: app-$IDLE_COLOR on host port $IDLE_PORT"
+docker run -d \
+  --name "app-$IDLE_COLOR" \
+  --network app_net \
+  -p "$IDLE_PORT":5000 \
+  -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
+  "$IMAGE" >/dev/null
+
+# --- Warmup/health check ---
+log "Warming up http://127.0.0.1:$IDLE_PORT/health ..."
+for i in {1..20}; do
+  if curl -fsS "http://127.0.0.1:$IDLE_PORT/health" >/dev/null; then
+    log "New app on $IDLE_COLOR:$IDLE_PORT is healthy."
+    break
+  fi
+  sleep 2
+  [ "$i" -eq 20 ] && { log "Health check failed for idle container."; exit 1; }
+done
+
+# --- Prepare NGINX conf (create once, then swap upstream) ---
+CONF=/etc/nginx/conf.d/bluegreen.conf
+if [ ! -f "$CONF" ]; then
+  log "Creating initial NGINX blue/green conf @ $CONF"
+  sudo mkdir -p /etc/nginx/conf.d
+  sudo tee "$CONF" >/dev/null <<NGX
+server {
+    listen 3000;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:$IDLE_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+}
+NGX
+  sudo nginx -t
+  sudo systemctl restart nginx
+  log "NGINX started and pointing to $IDLE_PORT"
+else
+  BEFORE=$(sudo grep -Eo 'proxy_pass http://127\.0\.0\.1:[0-9]+' "$CONF" || true)
+  log "NGINX currently points to: ${BEFORE:-unknown}"
+  log "Switching NGINX upstream to port $IDLE_PORT"
+  sudo sed -i "s|proxy_pass http://127.0.0.1:[0-9]*;|proxy_pass http://127.0.0.1:$IDLE_PORT;|g" "$CONF"
+  sudo nginx -t
+  sudo nginx -s reload
+  AFTER=$(sudo grep -Eo 'proxy_pass http://127\.0\.0\.1:[0-9]+' "$CONF" || true)
+  log "NGINX now points to: ${AFTER:-unknown}"
+fi
+
+log "Traffic switched to $IDLE_COLOR"
+
+# --- Cleanup old active (or keep for rollback) ---
+if [ "$ACTIVE_COLOR" != "none" ]; then
+  log "Stopping and removing old active container: app-$ACTIVE_COLOR"
+  docker rm -f "app-$ACTIVE_COLOR" >/dev/null 2>&1 || true
+else
+  log "No previous active container (first deploy)."
+fi
+
+# --- Diagnostics ---
+log "Containers (name/ports):"
+docker ps --format 'table {{.Names}}\t{{.Ports}}'
+
+log "Final NGINX upstream:"
+grep -Eo 'proxy_pass http://127\.0\.0\.1:[0-9]+' "$CONF" || true
+
+log "===== Deployment Finished Successfully ====="
+EOF
