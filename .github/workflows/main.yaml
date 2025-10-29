@@ -117,21 +117,21 @@ jobs:
             if [ ! -f /etc/nginx/conf.d/bluegreen.conf ]; then
               sudo mkdir -p /etc/nginx/conf.d
               sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<NGX
-server {
-    listen 3000;
-    server_name _;
-
-    location / {
-        proxy_pass http://127.0.0.1:\$IDLE_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-}
-NGX
+              server {
+                  listen 3000;
+                  server_name _;
+              
+                  location / {
+                      proxy_pass http://127.0.0.1:\$IDLE_PORT;
+                      proxy_http_version 1.1;
+                      proxy_set_header Connection "";
+                      proxy_set_header Host \$host;
+                      proxy_set_header X-Real-IP \$remote_addr;
+                      proxy_set_header X-Forwarded-Proto \$scheme;
+                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                  }
+              }
+              NGX
               sudo nginx -t
               sudo systemctl restart nginx
             else
