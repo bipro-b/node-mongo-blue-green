@@ -39,13 +39,13 @@ jobs:
           DOCKER_PASS_SECRET="${{ secrets.DOCKER_PASSWORD }}"
           APP_IMAGE="${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest"
 
-          echo "${{ secrets.AWS_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
+          echo "${{ secrets.AWS_KEY }}" > bipro.pem
+          chmod 600 bipro.pem
 
           # 2. SSH into remote host using UNQUOTED EOF (<< EOF)
           # This allows the runner to substitute the SECRET variables.
           # All variables meant for the REMOTE shell must now be ESCAPED (\$).
-          ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << EOF
+          ssh -o StrictHostKeyChecking=no -i bipro.pem ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << EOF
             set -e
 
             # --- Install docker & nginx if missing ---
