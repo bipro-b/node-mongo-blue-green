@@ -31,6 +31,7 @@ deploy:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+
     - name: Deploy to AWS EC2 (Blue-Green)
       env:
         IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
@@ -44,100 +45,100 @@ deploy:
         ssh -o StrictHostKeyChecking=no -i private_key.pem \
           ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} \
           "export IMAGE='${IMAGE}'; export DOCKER_USERNAME='${DOCKER_USERNAME}'; export DOCKER_PASSWORD='${DOCKER_PASSWORD}'; bash -s" << EOF
-set -euo pipefail
-
-# --- Install docker & nginx if missing ---
-if ! command -v docker >/dev/null 2>&1; then
-  sudo apt-get update -y
-  sudo apt-get install -y docker.io
-  sudo usermod -aG docker \$USER || true
-  sudo systemctl enable --now docker
-fi
-
-if ! command -v nginx >/dev/null 2>&1; then
-  sudo apt-get update -y
-  sudo apt-get install -y nginx
-fi
-
-# --- Ensure docker network (ignore if exists) ---
-docker network inspect app_net >/dev/null 2>&1 || docker network create app_net
-
-# --- Start MongoDB once (persists across deployments) ---
-if ! docker ps --format '{{.Names}}' | grep -q '^mongo-db$'; then
-  docker run -d \
-    --name mongo-db \
-    --network app_net \
-    -p 27017:27017 \
-    -v mongo_data:/data/db \
-    mongo:7
-  echo "Waiting for MongoDB to initialize..."
-  sleep 10
-fi
-
-# --- Login & pull image on the REMOTE machine ---
-echo "\$DOCKER_PASSWORD" | docker login -u "\$DOCKER_USERNAME" --password-stdin
-docker pull "\$IMAGE"
-
-# --- Determine active/idle colors & ports ---
-if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
-  ACTIVE_COLOR="blue";  IDLE_COLOR="green"; IDLE_PORT=3002; ACTIVE_PORT=3001
-elif docker ps --format '{{.Names}}' | grep -q '^app-green$'; then
-  ACTIVE_COLOR="green"; IDLE_COLOR="blue";  IDLE_PORT=3001; ACTIVE_PORT=3002
-else
-  ACTIVE_COLOR="none";  IDLE_COLOR="blue";  IDLE_PORT=3001
-fi
-echo "Active: \$ACTIVE_COLOR | Deploying to: \$IDLE_COLOR (port \$IDLE_PORT)"
-
-# --- Replace idle container ---
-docker rm -f app-\$IDLE_COLOR 2>/dev/null || true
-docker run -d \
-  --name app-\$IDLE_COLOR \
-  --network app_net \
-  -p \$IDLE_PORT:5000 \
-  -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
-  "\$IMAGE"
-
-# --- Warmup/health check ---
-for i in {1..20}; do
-  if curl -fsS "http://127.0.0.1:\$IDLE_PORT/health" >/dev/null; then
-    echo "New app is healthy."
-    break
-  fi
-  sleep 2
-done
-
-# --- NGINX: create once then swap upstream port ---
-if [ ! -f /etc/nginx/conf.d/bluegreen.conf ]; then
-  sudo mkdir -p /etc/nginx/conf.d
-  sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<NGX
-server {
-    listen 3000;
-    server_name _;
-
-    location / {
-        proxy_pass http://127.0.0.1:\$IDLE_PORT;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    }
-}
-NGX
-  sudo nginx -t
-  sudo systemctl restart nginx
-else
-  sudo sed -i "s|proxy_pass http://127.0.0.1:[0-9]*;|proxy_pass http://127.0.0.1:\$IDLE_PORT;|g" /etc/nginx/conf.d/bluegreen.conf
-  sudo nginx -t
-  sudo nginx -s reload
-fi
-
-echo "Switched traffic to \$IDLE_COLOR."
-
-# --- Cleanup old active (or keep for quick rollback) ---
-if [ "\$ACTIVE_COLOR" != "none" ]; then
-  docker rm -f app-\$ACTIVE_COLOR || true
-  echo "Removed old \$ACTIVE_COLOR."
-fi
-EOF
+        set -euo pipefail
+        echo "DOCKER_USERNAME"
+        # --- Install docker & nginx if missing ---
+        if ! command -v docker >/dev/null 2>&1; then
+          sudo apt-get update -y
+          sudo apt-get install -y docker.io
+          sudo usermod -aG docker \$USER || true
+          sudo systemctl enable --now docker
+        fi
+        
+        if ! command -v nginx >/dev/null 2>&1; then
+          sudo apt-get update -y
+          sudo apt-get install -y nginx
+        fi
+        
+        # --- Ensure docker network (ignore if exists) ---
+        docker network inspect app_net >/dev/null 2>&1 || docker network create app_net
+        
+        # --- Start MongoDB once (persists across deployments) ---
+        if ! docker ps --format '{{.Names}}' | grep -q '^mongo-db$'; then
+          docker run -d \
+            --name mongo-db \
+            --network app_net \
+            -p 27017:27017 \
+            -v mongo_data:/data/db \
+            mongo:7
+          echo "Waiting for MongoDB to initialize..."
+          sleep 10
+        fi
+        
+        # --- Login & pull image on the REMOTE machine ---
+        echo "\$DOCKER_PASSWORD" | docker login -u "\$DOCKER_USERNAME" --password-stdin
+        docker pull "\$IMAGE"
+        
+        # --- Determine active/idle colors & ports ---
+        if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
+          ACTIVE_COLOR="blue";  IDLE_COLOR="green"; IDLE_PORT=3002; ACTIVE_PORT=3001
+        elif docker ps --format '{{.Names}}' | grep -q '^app-green$'; then
+          ACTIVE_COLOR="green"; IDLE_COLOR="blue";  IDLE_PORT=3001; ACTIVE_PORT=3002
+        else
+          ACTIVE_COLOR="none";  IDLE_COLOR="blue";  IDLE_PORT=3001
+        fi
+        echo "Active: \$ACTIVE_COLOR | Deploying to: \$IDLE_COLOR (port \$IDLE_PORT)"
+        
+        # --- Replace idle container ---
+        docker rm -f app-\$IDLE_COLOR 2>/dev/null || true
+        docker run -d \
+          --name app-\$IDLE_COLOR \
+          --network app_net \
+          -p \$IDLE_PORT:5000 \
+          -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
+          "\$IMAGE"
+        
+        # --- Warmup/health check ---
+        for i in {1..20}; do
+          if curl -fsS "http://127.0.0.1:\$IDLE_PORT/health" >/dev/null; then
+            echo "New app is healthy."
+            break
+          fi
+          sleep 2
+        done
+        
+        # --- NGINX: create once then swap upstream port ---
+        if [ ! -f /etc/nginx/conf.d/bluegreen.conf ]; then
+          sudo mkdir -p /etc/nginx/conf.d
+          sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<NGX
+        server {
+            listen 3000;
+            server_name _;
+        
+            location / {
+                proxy_pass http://127.0.0.1:\$IDLE_PORT;
+                proxy_http_version 1.1;
+                proxy_set_header Connection "";
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            }
+        }
+        NGX
+          sudo nginx -t
+          sudo systemctl restart nginx
+        else
+          sudo sed -i "s|proxy_pass http://127.0.0.1:[0-9]*;|proxy_pass http://127.0.0.1:\$IDLE_PORT;|g" /etc/nginx/conf.d/bluegreen.conf
+          sudo nginx -t
+          sudo nginx -s reload
+        fi
+        
+        echo "Switched traffic to \$IDLE_COLOR."
+        
+        # --- Cleanup old active (or keep for quick rollback) ---
+        if [ "\$ACTIVE_COLOR" != "none" ]; then
+          docker rm -f app-\$ACTIVE_COLOR || true
+          echo "Removed old \$ACTIVE_COLOR."
+        fi
+        EOF
