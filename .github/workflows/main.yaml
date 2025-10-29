@@ -55,7 +55,7 @@ jobs:
             fi
 
             # --- Ensure docker network ---
-            docker network create app_net || true
+            # docker network create app_net || true
 
             # --- Start MongoDB once (persists across deployments) ---
             if ! docker ps --filter "name=mongo-db" --format '{{.Names}}' | grep -q '^mongo-db$'; then
