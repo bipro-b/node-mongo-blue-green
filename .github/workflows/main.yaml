@@ -78,7 +78,7 @@ jobs:
             # --- Pull latest app image ---
             # *** FIX: Using the full secrets syntax directly inside the heredoc ***
             docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
-            docker pull "${IMAGE}" # IMAGE is set in the local env block, so it is substituted here
+            docker pull ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest # IMAGE is set in the local env block, so it is substituted here
             
             # --- Determine active color ---
             if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
@@ -108,7 +108,7 @@ jobs:
               --network app_net \
               -p $IDLE_PORT:5000 \
               -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
-              "${IMAGE}"
+              ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
 
             # --- Simple warmup check (optional) ---
             echo "Warming up new app on port $IDLE_PORT..."
