@@ -1,36 +1,40 @@
 name: CI/CD for Express App (Blue-Green Deployment)
 
 on:
-  push:
-    branches: [ "main" ]
+  push:
+    branches: [ "main" ]
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
-        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3 # FIX: Use dedicated action
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and Push Docker Image
-        env:
-          IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
-        run: |
-          docker build -t "$IMAGE" .
-          docker push "$IMAGE"
-deploy:
+      - name: Build and Push Docker Image
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
+        run: |
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+  deploy:
     runs-on: ubuntu-latest
     needs: build-and-push
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-       - name: Deploy to AWS EC2 (Blue-Green)
+      - name: Deploy to AWS EC2 (Blue-Green)
         env:
           IMAGE: ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
         run: |
@@ -42,7 +46,7 @@ deploy:
           ssh -o StrictHostKeyChecking=no -i private_key.pem ${{ secrets.AWS_USER }}@${{ secrets.AWS_HOST }} << 'EOF'
             set -e
 
-            # --- Install docker & nginx if missing (unchanged) ---
+            # --- Install docker & nginx if missing ---
             if ! command -v docker >/dev/null 2>&1; then
               sudo apt-get update -y
               sudo apt-get install -y docker.io
@@ -58,7 +62,7 @@ deploy:
             # --- Ensure docker network (unchanged) ---
             docker network create app_net 2>/dev/null || true
 
-            # --- Start MongoDB once (unchanged) ---
+            # --- Start MongoDB once (persists across deployments) ---
             if ! docker ps --filter "name=mongo-db" --format '{{.Names}}' | grep -q '^mongo-db$'; then 
               docker run -d \
                 --name mongo-db \
@@ -70,11 +74,11 @@ deploy:
               sleep 10
             fi
 
-            # --- Pull latest app image (unchanged) ---
+            # --- Pull latest app image ---
             docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
             docker pull ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
             
-            # --- Determine active color (unchanged) ---
+            # --- Determine active color ---
             if docker ps --format '{{.Names}}' | grep -q '^app-blue$'; then
               ACTIVE_COLOR="blue"
               IDLE_COLOR="green"
@@ -93,10 +97,10 @@ deploy:
 
             echo "Active: \$ACTIVE_COLOR | Deploying to idle: \$IDLE_COLOR (port \$IDLE_PORT)"
 
-            # --- Stop/remove idle container if exists (unchanged) ---
+            # --- Stop/remove idle container if exists ---
             docker rm -f app-\$IDLE_COLOR 2>/dev/null || true
 
-            # --- Run idle container (unchanged) ---
+            # --- Run idle container (bind to its host port) ---
             docker run -d \
               --name app-\$IDLE_COLOR \
               --network app_net \
@@ -104,7 +108,7 @@ deploy:
               -e MONGO_URL="mongodb://mongo-db:27017/bluegreen" \
               ${{ secrets.DOCKER_USERNAME }}/bluegreen-express:latest
 
-            # --- Simple warmup check (unchanged) ---
+            # --- Simple warmup check (optional) ---
             echo "Warming up new app on port \$IDLE_PORT..."
             for i in {1..20}; do
               if curl -fsS "http://127.0.0.1:\$IDLE_PORT/health" >/dev/null; then
@@ -117,14 +121,13 @@ deploy:
             # --- Put NGINX config in place (once), then switch upstream port ---
             if [ ! -f /etc/nginx/conf.d/bluegreen.conf ]; then
               sudo mkdir -p /etc/nginx/conf.d
-              # FIX: Use <<-NGX to allow indented closing delimiter and escape variables
-              sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<-NGX
+              sudo tee /etc/nginx/conf.d/bluegreen.conf >/dev/null <<-NGX # FIX: Use <<-NGX
               server {
                   listen 3000;
                   server_name _;
                                 
                   location / {
-                      proxy_pass http://127.0.0.1:\$IDLE_PORT; # <--- ESCAPED for remote shell
+                      proxy_pass http://127.0.0.1:\$IDLE_PORT;
                       proxy_http_version 1.1;
                       proxy_set_header Connection "";
                       proxy_set_header Host \$host;
@@ -133,12 +136,11 @@ deploy:
                       proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
                   }
               }
-              NGX # <--- Must be indented with TABS due to <<-NGX
+              NGX # MUST be indented with TABS
               sudo nginx -t
               sudo systemctl restart nginx
             else
               # swap the upstream port inside the file
-              # FIX: Escaped the shell variables in sed for remote execution
               sudo sed -i "s|proxy_pass http://127.0.0.1:[0-9]*;|proxy_pass http://127.0.0.1:\$IDLE_PORT;|g" /etc/nginx/conf.d/bluegreen.conf
               sudo nginx -t
               sudo nginx -s reload
@@ -146,10 +148,9 @@ deploy:
 
             echo "Switched traffic to \$IDLE_COLOR."
 
-            # --- Remove old active container (unchanged) ---
-            if [ "\$ACTIVE_COLOR" != "none" ]; then
+            # --- Remove old active container to free port (keep for rollback if you prefer) ---
+            if [ "\$ACTIVE_COLOR" != "none" ]; then # Consistency check for escaping
               docker rm -f app-\$ACTIVE_COLOR || true
               echo "Removed old \$ACTIVE_COLOR."
             fi
           EOF
-  
